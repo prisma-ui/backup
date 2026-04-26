@@ -935,7 +935,11 @@ local EmbeddedModules = {
 				if expanded == Explorer.SearchExpanded then context:AddRegistered("CLEAR_SEARCH_AND_JUMP_TO") end
 				if env.setclipboard then context:AddRegistered("COPY_PATH") end
 				context:AddRegistered("INSERT_OBJECT")
-				-- context:AddRegistered("SAVE_INST")
+				-- PATCH: Save full map & save model selalu tersedia di context menu
+				if env.saveinstance then
+					context:AddRegistered("SAVE_FULL_MAP")
+					context:AddRegistered("SAVE_INST")
+				end
 				-- context:AddRegistered("CALL_FUNCTION")
 				-- context:AddRegistered("VIEW_CONNECTIONS")
 				-- context:AddRegistered("GET_REFERENCES")
@@ -1360,8 +1364,57 @@ local EmbeddedModules = {
 
 				end})
 
-				context:Register("SAVE_INST",{Name = "Save to File", IconMap = Explorer.MiscIcons, Icon = "Save", OnClick = function()
+				context:Register("SAVE_FULL_MAP",{Name = "Save Full Map (.rbxl)", IconMap = Explorer.MiscIcons, Icon = "Save", OnClick = function()
+					-- PATCH: Save seluruh game sebagai .rbxl
+					if not env.saveinstance then
+						warn("[Dex] saveinstance tidak tersedia")
+						return
+					end
+					local placeName = env.parsefile(game.Name ~= "" and game.Name or "Place_"..game.PlaceId)
+					local fileName = placeName .. "_" .. os.date("%d-%m-%Y_%H-%M-%S") .. ".rbxl"
+					print("[Dex] Menyimpan full map: " .. fileName .. " ...")
+					task.spawn(function()
+						local ok, err = pcall(env.saveinstance, game, fileName, {
+							Decompile = (env.decompile ~= nil),
+							DecompileTimeout = 10,
+							NilInstances = false,
+							RemovePlayerCharacters = true,
+							ShowStatus = true,
+						})
+						if ok then
+							print("[Dex] ✓ Full map tersimpan: " .. fileName)
+						else
+							warn("[Dex] ✗ Gagal simpan full map: " .. tostring(err))
+						end
+					end)
+				end})
 
+				context:Register("SAVE_INST",{Name = "Save as Model (.rbxm)", IconMap = Explorer.MiscIcons, Icon = "Save", OnClick = function()
+					-- PATCH: Save selected objects as .rbxm
+					if not env.saveinstance then
+						warn("[Dex] saveinstance tidak tersedia di executor ini")
+						return
+					end
+					local sList = selection.List
+					if #sList == 0 then return end
+					-- Buat Model container sementara
+					local container = Instance.new("Model")
+					container.Name = "SavedModel"
+					for _, node in ipairs(sList) do
+						local ok, clone = pcall(function() return node.Obj:Clone() end)
+						if ok and clone then
+							clone.Parent = container
+							if #sList == 1 then container.Name = node.Obj.Name end
+						end
+					end
+					local fileName = env.parsefile(container.Name) .. "_" .. os.time() .. ".rbxm"
+					local ok2, err2 = pcall(env.saveinstance, container, fileName, {Decompile = false})
+					container:Destroy()
+					if ok2 then
+						print("[Dex] Model tersimpan: " .. fileName)
+					else
+						warn("[Dex] Gagal menyimpan model: " .. tostring(err2))
+					end
 				end})
 
                 context:Register("VIEW_CONNECTIONS",{Name = "View Connections", OnClick = function()
@@ -4274,8 +4327,18 @@ local EmbeddedModules = {
 				copy.TextColor3 = Color3.new(1,1,1)
 
 				copy.MouseButton1Click:Connect(function()
+					-- PATCH: fallback clipboard
 					local source = codeFrame:GetText()
-					env.setclipboard(source)
+					local cb = env.setclipboard or setclipboard or toclipboard or (Clipboard and Clipboard.set)
+					if cb then
+						pcall(cb, source)
+						copy.Text = "✓ Copied!"
+						task.delay(1.5, function() copy.Text = "Copy to Clipboard" end)
+					else
+						copy.Text = "No clipboard API"
+						task.delay(2, function() copy.Text = "Copy to Clipboard" end)
+						warn("[Dex ScriptViewer] setclipboard tidak tersedia di executor ini")
+					end
 				end)
 
 				local save = Instance.new("TextButton",window.GuiElems.Content)
@@ -4286,12 +4349,34 @@ local EmbeddedModules = {
 				save.TextColor3 = Color3.new(1,1,1)
 
 				save.MouseButton1Click:Connect(function()
+					-- PATCH: robust save with script name
 					local source = codeFrame:GetText()
-					local filename = "Place_"..game.PlaceId.."_Script_"..os.time()..".txt"
-
-					env.writefile(filename, source)
-					if env.movefileas then
-						env.movefileas(filename, ".txt")
+					if not source or #source == 0 then
+						save.Text = "No content"
+						task.delay(2, function() save.Text = "Save to File" end)
+						return
+					end
+					local wf = env.writefile or writefile
+					if not wf then
+						save.Text = "No writefile API"
+						task.delay(2, function() save.Text = "Save to File" end)
+						warn("[Dex ScriptViewer] writefile tidak tersedia di executor ini")
+						return
+					end
+					local scriptName = "Script"
+					if PreviousScr then
+						scriptName = env.parsefile(PreviousScr.Name)
+					end
+					local filename = "Place_"..game.PlaceId.."_"..scriptName.."_"..os.time()..".lua"
+					local ok, err = pcall(wf, filename, source)
+					if ok then
+						save.Text = "✓ Saved!"
+						task.delay(2, function() save.Text = "Save to File" end)
+						print("[Dex ScriptViewer] Tersimpan: " .. filename)
+					else
+						save.Text = "✗ Error"
+						task.delay(2, function() save.Text = "Save to File" end)
+						warn("[Dex ScriptViewer] Gagal simpan: " .. tostring(err))
 					end
 				end)
 
@@ -4303,6 +4388,17 @@ local EmbeddedModules = {
 				dumpbtn.TextColor3 = Color3.new(1,1,1)
 
 				dumpbtn.MouseButton1Click:Connect(function()
+					-- PATCH: cek semua deps tersedia
+					local getgc_fn = env.getgc or getgc or get_gc_objects
+					local getupvalues_fn = env.getupvalues or (debug and debug.getupvalues) or getupvalues or getupvals
+					local getconstants_fn = env.getconstants or (debug and debug.getconstants) or getconstants or getconsts
+					local getinfo_fn = env.getinfo or (debug and (debug.getinfo or debug.info)) or getinfo
+					if not getgc_fn then
+						dumpbtn.Text = "No getgc"
+						task.delay(2, function() dumpbtn.Text = "Dump Functions" end)
+						warn("[Dex ScriptViewer] getgc tidak tersedia di executor ini")
+						return
+					end
 					if PreviousScr ~= nil then
 						pcall(function()
 							-- thanks King.Kevin#6025 you'll obviously be credited (no discord tag since that can easily be impersonated)
@@ -11538,18 +11634,123 @@ local EmbeddedModules = {
 				Button.Transparency = 1
 
 				FilenameTextBox.TextBox.Text = fileName
+
+				-- PATCH: Resize window untuk akomodasi 2 tombol
+				window:Resize(350, 380)
+				ListFrame.Size = UDim2.new(1, 0, 1, -60)
+
+				-- Geser filename textbox
+				FilenameTextBox.Gui.Size = UDim2.new(1,0, 0,20)
+				FilenameTextBox.Gui.Position = UDim2.new(0,0, 1,-60)
+
+				-- Tombol Save Full Map (.rbxl)
+				local BtnFullMap = Lib.Frame.new()
+				BtnFullMap.Gui.Parent = window.GuiElems.Content
+				BtnFullMap.Size = UDim2.new(0.5,0, 0,20)
+				BtnFullMap.Position = UDim2.new(0,0, 1,-40)
+
+				local LabelFullMap = Lib.Label.new()
+				LabelFullMap.Gui.Parent = window.GuiElems.Content
+				LabelFullMap.Size = UDim2.new(0.5,0, 0,20)
+				LabelFullMap.Position = UDim2.new(0,0, 1,-40)
+				LabelFullMap.Gui.Text = "Save Full Map (.rbxl)"
+				LabelFullMap.Gui.TextXAlignment = Enum.TextXAlignment.Center
+				LabelFullMap.Gui.TextColor3 = Color3.fromRGB(100, 200, 255)
+
+				local BtnFullMapBtn = Instance.new("TextButton")
+				BtnFullMapBtn.Parent = BtnFullMap.Gui
+				BtnFullMapBtn.Size = UDim2.new(1,0, 1,0)
+				BtnFullMapBtn.Transparency = 1
+
+				-- Tombol Save Model (.rbxm)
+				local BtnModel = Lib.Frame.new()
+				BtnModel.Gui.Parent = window.GuiElems.Content
+				BtnModel.Size = UDim2.new(0.5,0, 0,20)
+				BtnModel.Position = UDim2.new(0.5,0, 1,-40)
+
+				local LabelModel = Lib.Label.new()
+				LabelModel.Gui.Parent = window.GuiElems.Content
+				LabelModel.Size = UDim2.new(0.5,0, 0,20)
+				LabelModel.Position = UDim2.new(0.5,0, 1,-40)
+				LabelModel.Gui.Text = "Save Model (.rbxm)"
+				LabelModel.Gui.TextXAlignment = Enum.TextXAlignment.Center
+				LabelModel.Gui.TextColor3 = Color3.fromRGB(120, 255, 160)
+
+				local BtnModelBtn = Instance.new("TextButton")
+				BtnModelBtn.Parent = BtnModel.Gui
+				BtnModelBtn.Size = UDim2.new(1,0, 1,0)
+				BtnModelBtn.Transparency = 1
+
+				-- Tombol Save (legacy, sekarang jadi Save Full Map juga)
+				BackgroundButton.Position = UDim2.new(0,0, 1,-20)
+				LabelButton.Position = UDim2.new(0,0, 1,-20)
+				LabelButton.Gui.Text = "Save Full Map (.rbxl)"
+
 				Button.MouseButton1Click:Connect(function()
-					local fileName = FilenameTextBox.TextBox.Text:gsub("{TIMESTAMP}", os.date("%d-%m-%Y_%H-%M-%S"))
-					window:SetTitle("Save Instance - Saving")
-					local s, result = pcall(env.saveinstance, game, env.parsefile(fileName), SaveInstanceArgs)
-					if s then
-						window:SetTitle("Save Instance - Saved")
+					local fName = FilenameTextBox.TextBox.Text:gsub("{TIMESTAMP}", os.date("%d-%m-%Y_%H-%M-%S"))
+					if not fName:match("%.rbxl$") then fName = fName .. ".rbxl" end
+					window:SetTitle("Save Instance - Saving Full Map...")
+					task.spawn(function()
+						local s, result = pcall(env.saveinstance, game, env.parsefile(fName), SaveInstanceArgs)
+						if s then window:SetTitle("Save Instance - Saved!")
+						else window:SetTitle("Save Instance - Error") warn(result) end
+						task.wait(5) window:SetTitle("Save Instance")
+					end)
+				end)
+
+				BtnFullMapBtn.MouseButton1Click:Connect(function()
+					local fName = FilenameTextBox.TextBox.Text:gsub("{TIMESTAMP}", os.date("%d-%m-%Y_%H-%M-%S"))
+					if not fName:match("%.rbxl$") then fName = fName .. ".rbxl" end
+					window:SetTitle("Saving Full Map...")
+					LabelFullMap.Gui.Text = "Saving..."
+					task.spawn(function()
+						local s, result = pcall(env.saveinstance, game, env.parsefile(fName), SaveInstanceArgs)
+						if s then
+							window:SetTitle("Save Instance - Saved!")
+							LabelFullMap.Gui.Text = "✓ Saved!"
+						else
+							window:SetTitle("Save Instance - Error")
+							LabelFullMap.Gui.Text = "✗ Error"
+							warn(result)
+						end
+						task.wait(4)
+						LabelFullMap.Gui.Text = "Save Full Map (.rbxl)"
+						window:SetTitle("Save Instance")
+					end)
+				end)
+
+				BtnModelBtn.MouseButton1Click:Connect(function()
+					-- Ambil selection dari Explorer jika ada, fallback ke workspace
+					local targets = {}
+					local expSel = Explorer and Explorer.Selection and Explorer.Selection.List
+					if expSel and #expSel > 0 then
+						for _, node in ipairs(expSel) do
+							table.insert(targets, node.Obj)
+						end
 					else
-						window:SetTitle("Save Instance - Error")
-						task.spawn(error("Failed to save the game: "..result))
+						table.insert(targets, workspace)
 					end
-					task.wait(5)
-					window:SetTitle("Save Instance")
+					local container = Instance.new("Model")
+					container.Name = #targets == 1 and targets[1].Name or "SavedModel"
+					for _, obj in ipairs(targets) do
+						local ok, clone = pcall(function() return obj:Clone() end)
+						if ok and clone then clone.Parent = container end
+					end
+					local fName = env.parsefile(container.Name) .. "_" .. os.time() .. ".rbxm"
+					LabelModel.Gui.Text = "Saving..."
+					task.spawn(function()
+						local ok2, err2 = pcall(env.saveinstance, container, fName, {Decompile = false})
+						container:Destroy()
+						if ok2 then
+							LabelModel.Gui.Text = "✓ Saved!"
+							print("[Dex] Model tersimpan: " .. fName)
+						else
+							LabelModel.Gui.Text = "✗ Error"
+							warn("[Dex] Gagal: " .. tostring(err2))
+						end
+						task.wait(3)
+						LabelModel.Gui.Text = "Save Model (.rbxm)"
+					end)
 				end)
 			end
 
